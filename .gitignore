@@ -1,0 +1,13 @@
+# ESP-IDF build directory
+build/
+sdkconfig
+sdkconfig.old
+sdkconfig.ci
+managed_components/
+
+# Editor & IDE files
+.vscode/
+.idea/
+*.swp
+*.tmp
+.DS_Store

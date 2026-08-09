@@ -1,0 +1,75 @@
+# ESP32-C3 SwitchBot Smart Home & smartOptSensor Hub
+
+ESP32-C3 上で動作する高機能 Web サーバー経由で SwitchBot Open API v1.1 を制御し、同時に CdS 照度センサーによる照度計測および Matter Over Wi-Fi Light Sensor サービスを並行稼働させる統合システムです。
+
+---
+
+## 🌟 特長 (Features)
+
+- **ESP32-C3 マイコン対応**: ESP32-C3 ターゲットに最適化されたファームウェア構成。
+- **smartOptSensor 照度計測機能**:
+  - **ピン配置**: `GPIO1` (ADC1_CH1) にて CdS セルと 10kΩ プルダウン抵抗による分圧回路を 1,000ms 周期で高精度サンプリング（10回分散平均）。
+  - **Lux & Matter 換算**: ADC生値・キャリブレーション電圧から CdS 抵抗値、Lux（照度）、および Matter 規格の `MeasuredValue`（`10000 * log10(lux) + 1`）を自動算出してシリアルログおよび Web UI にリアルタイム表示。
+- **Matter Over Wi-Fi 対応**: Matter Light Sensor Endpoint (`0x0106`, Cluster `0x0400`) を提供し、Google Home などのスマートホームエコシステムから照度センサーとして認識・利用可能。
+- **ファクトリーリセット**: `GPIO9` ボタンを 3 秒以上長押しすることで Matter および NVS 設定のリセットを実行可能。
+- **SwitchBot Open API v1.1 HMAC-SHA256 認証実装**: `mbedtls` を使用して `token`, `secret`, ミリ秒精度 `t`, ランダム `nonce` による暗号署名を生成。
+- **NTP 時刻同期**: `esp_netif_sntp` で世界標準時を取得し、正確なタイムスタンプで API リクエストを送信。
+- **レスポンシブ Glassmorphism UI**: 照度センサーのリアルタイム表示バナーと SwitchBot 各種家電操作カードを一体化したデザイン。
+- **SoftAP フォールバック & NVS 永続化**: Wi-Fi未設定時または接続失敗時は自動的に AP モード (`ESP32-SwitchBot-Setup`, `192.168.4.1`) で起動。
+
+---
+
+## 🔌 ピン配置 (Pin Mapping)
+
+| ESP32-C3 ピン | 接続先 | 役割 |
+| :--- | :--- | :--- |
+| **3.3V** | CdS セルの片足 | 電源供給 |
+| **GPIO1 (ADC1_CH1)** | CdSセルと10kΩ抵抗の接続点 | ADC照度計測入力 |
+| **GND** | 10kΩ 抵抗の片足 | グランド |
+| **GPIO9** | タクトスイッチ（GNDへ短絡） | 3秒長押しでファクトリーリセット |
+
+---
+
+## 🛠 ビルドおよび書き込み方法 (Build & Flash)
+
+### 1. 環境変数のロード
+
+```bash
+source /home/kusa/esp/esp-idf/export.sh
+source /home/kusa/esp/esp-matter/export.sh
+```
+
+### 2. ターゲットを esp32c3 に設定
+
+```bash
+cd /home/kusa/ドキュメント/eSp32/SwitchBot+sensor
+idf.py set-target esp32c3
+```
+
+### 3. プロジェクトのビルド
+
+```bash
+idf.py build
+```
+
+### 4. ESP32-C3 への書き込みとシリアルモニタ
+
+```bash
+idf.py -p /dev/ttyACM0 flash monitor
+```
+
+---
+
+## 📡 REST API 仕様 (Local Endpoints)
+
+| エンドポイント | メソッド | 説明 |
+| --- | --- | --- |
+| `/` | `GET` | WebダッシュボードUIの配信 |
+| `/api/status` | `GET` | IPアドレス、WiFi電波強度(RSSI)、メモリ、NTP同期状態 |
+| `/api/sensor` | `GET` | CdS照度センサー情報取得 (`raw_adc`, `voltage_mv`, `resistance_ohm`, `lux`, `matter_value`) |
+| `/api/config` | `POST` | Wi-FiおよびSwitchBot認証情報のNVS保存 |
+| `/api/devices` | `GET` | SwitchBot Cloudから全デバイス・IRリモコン一覧を取得 |
+| `/api/device/command` | `POST` | デバイスへの操作コマンド送信 (`{"deviceId":"...","command":"turnOn"}`) |
+| `/api/scenes` | `GET` | 登録済みシーン一覧の取得 |
+| `/api/scene/execute` | `POST` | シーンの実行 (`{"sceneId":"..."}`) |
+
