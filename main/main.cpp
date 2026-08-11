@@ -302,5 +302,5 @@ extern "C" void app_main(void)
     xTaskCreate(factory_reset_task, "factory_reset", 4096, nullptr, 1, nullptr);
 
     ESP_LOGI(TAG, "Initialization finished successfully!");
-    ESP_LOGI(TAG, "Access Web Control Dashboard at: http://%s/", wifi_manager_get_ip());
+    ESP_LOGI(TAG, "Access Web Control Dashboard at: http://esp32-switchbot.local/ or http://%s/", wifi_manager_get_ip());
 }

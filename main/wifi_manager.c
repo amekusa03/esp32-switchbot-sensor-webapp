@@ -5,6 +5,7 @@
 #include "esp_netif.h"
 #include "esp_sntp.h"
 #include "esp_http_client.h"
+#include "mdns.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
@@ -17,6 +18,8 @@ static const char *TAG = "WIFI_MGR";
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
 #define MAXIMUM_RETRY      5
+#define MDNS_HOSTNAME      "esp32-switchbot"
+#define MDNS_INSTANCE      "ESP32 SwitchBot Sensor"
 
 static EventGroupHandle_t s_wifi_event_group;
 static int s_retry_num = 0;
@@ -24,6 +27,51 @@ static bool s_is_connected = false;
 static bool s_is_ap_mode = false;
 static bool s_time_synced = false;
 static char s_ip_str[16] = "0.0.0.0";
+
+static void start_mdns(void) {
+    // Matter SDK (CONFIG_USE_MINIMAL_MDNS=n) は ESP-IDF の mDNS コンポーネントを使い、
+    // MACアドレスベースのホスト名を設定・管理する。
+    // mdns_hostname_set() で上書きしても Matter が再設定してしまうため、
+    // mdns_delegate_hostname_add() で「追加ホスト名」として登録する。
+
+    // mDNS が未初期化なら初期化（SoftAP単体起動時など）
+    // Matter 経由で初期化済みの場合は ESP_ERR_INVALID_STATE が返るだけで安全
+    mdns_init();
+
+    // 現在の IP アドレスを取得
+    esp_netif_ip_info_t ip_info;
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (!netif) {
+        netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    }
+    if (!netif || esp_netif_get_ip_info(netif, &ip_info) != ESP_OK) {
+        ESP_LOGE(TAG, "mDNS: Failed to get IP info");
+        return;
+    }
+
+    // delegate hostname 用のアドレスリストを作成
+    mdns_ip_addr_t delegate_addr;
+    memset(&delegate_addr, 0, sizeof(delegate_addr));
+    delegate_addr.addr.type = ESP_IPADDR_TYPE_V4;
+    delegate_addr.addr.u_addr.ip4.addr = ip_info.ip.addr;
+    delegate_addr.next = NULL;
+
+    esp_err_t err = mdns_delegate_hostname_add(MDNS_HOSTNAME, &delegate_addr);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "mDNS delegate hostname added: " MDNS_HOSTNAME ".local -> " IPSTR,
+                 IP2STR(&ip_info.ip));
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        ESP_LOGI(TAG, "mDNS delegate hostname already registered");
+    } else {
+        ESP_LOGE(TAG, "mdns_delegate_hostname_add failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    // HTTP サービスを delegate hostname に紐づけて登録
+    mdns_service_add_for_host(MDNS_INSTANCE, "_http", "_tcp", MDNS_HOSTNAME, 80, NULL, 0);
+
+    ESP_LOGI(TAG, "mDNS ready: http://" MDNS_HOSTNAME ".local/");
+}
 
 static bool parse_http_date(const char *date_str, time_t *out_time) {
     int day, year, hour, min, sec;
@@ -144,6 +192,7 @@ static void event_handler(void* arg, esp_event_base_t event_base,
         s_retry_num = 0;
         s_is_connected = true;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        start_mdns();
         xTaskCreate(sntp_sync_task, "sntp_task", 4096, NULL, 5, NULL);
     }
 }
@@ -175,10 +224,11 @@ static void start_softap(void) {
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
     strcpy(s_ip_str, "192.168.4.1");
+    start_mdns();
     ESP_LOGI(TAG, "============================================================");
     ESP_LOGI(TAG, "SoftAP Mode Started!");
     ESP_LOGI(TAG, "1. Connect your PC/Phone Wi-Fi to SSID: ESP32-SwitchBot-Setup");
-    ESP_LOGI(TAG, "2. Open Browser at: http://192.168.4.1/");
+    ESP_LOGI(TAG, "2. Open Browser at: http://" MDNS_HOSTNAME ".local/ or http://192.168.4.1/");
     ESP_LOGI(TAG, "============================================================");
 }
 

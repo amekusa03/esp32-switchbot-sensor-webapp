@@ -19,6 +19,7 @@ idf_component_register(
         json
         log
         lwip
+        mdns
         esp_matter
         esp_adc
         driver

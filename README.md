@@ -15,6 +15,7 @@ ESP32-C3 上で動作する高機能 Web サーバー経由で SwitchBot Open AP
 - **SwitchBot Open API v1.1 HMAC-SHA256 認証実装**: `mbedtls` を使用して `token`, `secret`, ミリ秒精度 `t`, ランダム `nonce` による暗号署名を生成。
 - **NTP 時刻同期**: `esp_netif_sntp` で世界標準時を取得し、正確なタイムスタンプで API リクエストを送信。
 - **レスポンシブ Glassmorphism UI**: 照度センサーのリアルタイム表示バナーと SwitchBot 各種家電操作カードを一体化したデザイン。
+- **mDNS (Bonjour) 対応**: `http://esp32-switchbot.local/` でアクセス可能。IPアドレスを覚える必要なし。Matter の mDNS と共存する delegate hostname 方式を採用。
 - **SoftAP フォールバック & NVS 永続化**: Wi-Fi未設定時または接続失敗時は自動的に AP モード (`ESP32-SwitchBot-Setup`, `192.168.4.1`) で起動。
 
 ---
@@ -57,6 +58,23 @@ idf.py build
 ```bash
 idf.py -p /dev/ttyACM0 flash monitor
 ```
+
+---
+
+## 🌐 ネットワークアクセス (Network Access)
+
+Wi-Fi 接続後、以下のいずれかの URL でダッシュボードにアクセスできます。
+
+| 方法 | URL | 備考 |
+| :--- | :--- | :--- |
+| **mDNS (推奨)** | `http://esp32-switchbot.local/` | iOS / macOS / Windows 10以降 / Linux (Avahi) で対応 |
+| **IPアドレス直接** | `http://<IPアドレス>/` | シリアルモニタで確認可能 |
+| **SoftAP モード** | `http://192.168.4.1/` | 初期設定時・Wi-Fi未接続時 |
+
+> **💡 Linux で mDNS を使う場合**: `avahi-daemon` と `libnss-mdns` のインストールが必要です。
+> ```bash
+> sudo apt install avahi-daemon libnss-mdns
+> ```
 
 ---
 
