@@ -9,8 +9,8 @@
 extern "C" {
 #endif
 
-// CdS センサ回路設定 (10kΩ プルダウン抵抗, 電源 3.3V)
-#define CDS_PULLDOWN_RESISTOR  10000.0f        // 10kΩ プルダウン抵抗
+// CdS センサ回路設定 (約9.1kΩ プルダウン抵抗: 100kΩ // 10kΩ, 電源 3.3V)
+#define CDS_PULLDOWN_RESISTOR  9091.0f        // 約9.1kΩ プルダウン抵抗 (100kΩ // 10kΩ)
 #define CDS_VCC_MV             3300.0f         // 電源電圧 3.3V (3300mV)
 
 typedef struct {
@@ -40,6 +40,33 @@ esp_err_t cds_sensor_read(cds_sensor_data_t *data);
  * @return uint16_t Matter MeasuredValue
  */
 uint16_t cds_sensor_lux_to_matter_value(float lux);
+
+/**
+ * @brief 校正点を設定する（2点校正: point=1 or 2）
+ * @param point 校正点番号 (1=明側, 2=暗側)
+ * @param raw   その時点のADC生値
+ * @param lux   実測照度 (Lux)
+ * @return esp_err_t ESP_OK成功時
+ */
+esp_err_t cds_sensor_set_calib_point(int point, int raw, float lux);
+
+/**
+ * @brief NVSから校正値をロードして適用（init後に呼ぶ）
+ * @return esp_err_t ESP_OK成功時
+ */
+esp_err_t cds_sensor_load_calib_from_nvs(void);
+
+/**
+ * @brief 現在の校正点をNVSに保存
+ * @return esp_err_t ESP_OK成功時
+ */
+esp_err_t cds_sensor_save_calib_to_nvs(void);
+
+/**
+ * @brief 現在の校正パラメータを取得（NULL可: 不要な出力は省略可）
+ */
+void cds_sensor_get_calib_params(int *raw1, float *lux1, int *raw2, float *lux2,
+                                  float *out_A, float *out_Rref, float *out_n);
 
 #ifdef __cplusplus
 }

@@ -200,6 +200,101 @@ static esp_err_t api_scenes_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+static esp_err_t api_sensor_calib_get_handler(httpd_req_t *req) {
+    int raw1, raw2;
+    float lux1, lux2, A, Rref, n;
+    cds_sensor_get_calib_params(&raw1, &lux1, &raw2, &lux2, &A, &Rref, &n);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "raw1",  raw1);
+    cJSON_AddNumberToObject(root, "lux1",  lux1);
+    cJSON_AddNumberToObject(root, "raw2",  raw2);
+    cJSON_AddNumberToObject(root, "lux2",  lux2);
+    cJSON_AddNumberToObject(root, "A",     A);
+    cJSON_AddNumberToObject(root, "R_ref", Rref);
+    cJSON_AddNumberToObject(root, "n",     n);
+
+    const char *resp = cJSON_PrintUnformatted(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    free((void*)resp);
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
+static esp_err_t api_sensor_calib_post_handler(httpd_req_t *req) {
+    char *body = read_http_body(req);
+    if (!body) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid body");
+        return ESP_FAIL;
+    }
+
+    cJSON *json = cJSON_Parse(body);
+    free(body);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "JSON parse error");
+        return ESP_FAIL;
+    }
+
+    cJSON *action = cJSON_GetObjectItem(json, "action");
+    if (!cJSON_IsString(action)) {
+        cJSON_Delete(json);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing action");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+
+    if (strcmp(action->valuestring, "set_point") == 0) {
+        cJSON *pt_j  = cJSON_GetObjectItem(json, "point");
+        cJSON *lux_j = cJSON_GetObjectItem(json, "lux");
+        if (!cJSON_IsNumber(pt_j) || !cJSON_IsNumber(lux_j)) {
+            cJSON_Delete(json);
+            httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Missing point or lux\"}");
+            return ESP_OK;
+        }
+        int   pt  = (int)pt_j->valuedouble;
+        float lux = (float)lux_j->valuedouble;
+
+        // 現在のADC RAW値を最新センサーデータから取得
+        cds_sensor_data_t data = {0};
+        get_latest_cds_sensor_data(&data);
+        int raw = data.raw_adc;
+        cJSON_Delete(json);
+
+        esp_err_t err = cds_sensor_set_calib_point(pt, raw, lux);
+        if (err == ESP_OK) {
+            float A, Rref, n;
+            cds_sensor_get_calib_params(NULL, NULL, NULL, NULL, &A, &Rref, &n);
+            cJSON *resp = cJSON_CreateObject();
+            cJSON_AddStringToObject(resp, "status", "ok");
+            cJSON_AddNumberToObject(resp, "raw",   raw);
+            cJSON_AddNumberToObject(resp, "A",     A);
+            cJSON_AddNumberToObject(resp, "R_ref", Rref);
+            cJSON_AddNumberToObject(resp, "n",     n);
+            const char *s = cJSON_PrintUnformatted(resp);
+            httpd_resp_sendstr(req, s);
+            free((void*)s);
+            cJSON_Delete(resp);
+        } else {
+            httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"set_point failed\"}");
+        }
+    } else if (strcmp(action->valuestring, "save") == 0) {
+        cJSON_Delete(json);
+        esp_err_t err = cds_sensor_save_calib_to_nvs();
+        if (err == ESP_OK) {
+            httpd_resp_sendstr(req, "{\"status\":\"ok\",\"message\":\"Calibration saved to NVS\"}");
+        } else {
+            httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"NVS save failed\"}");
+        }
+    } else {
+        cJSON_Delete(json);
+        httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Unknown action\"}");
+    }
+
+    return ESP_OK;
+}
+
 static esp_err_t api_scene_execute_post_handler(httpd_req_t *req) {
     char *body = read_http_body(req);
     if (!body) {
@@ -240,7 +335,7 @@ static esp_err_t api_scene_execute_post_handler(httpd_req_t *req) {
 
 esp_err_t web_server_start(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 12;
+    config.max_uri_handlers = 14;
     config.stack_size = 10240;
     config.lru_purge_enable = true;
 
@@ -256,8 +351,10 @@ esp_err_t web_server_start(void) {
     httpd_uri_t uri_config_post = { .uri = "/api/config", .method = HTTP_POST, .handler = api_config_post_handler };
     httpd_uri_t uri_devices_get = { .uri = "/api/devices", .method = HTTP_GET, .handler = api_devices_get_handler };
     httpd_uri_t uri_cmd_post = { .uri = "/api/device/command", .method = HTTP_POST, .handler = api_device_command_post_handler };
-    httpd_uri_t uri_scenes_get = { .uri = "/api/scenes", .method = HTTP_GET, .handler = api_scenes_get_handler };
-    httpd_uri_t uri_scene_exec = { .uri = "/api/scene/execute", .method = HTTP_POST, .handler = api_scene_execute_post_handler };
+    httpd_uri_t uri_scenes_get     = { .uri = "/api/scenes",            .method = HTTP_GET,  .handler = api_scenes_get_handler };
+    httpd_uri_t uri_scene_exec     = { .uri = "/api/scene/execute",     .method = HTTP_POST, .handler = api_scene_execute_post_handler };
+    httpd_uri_t uri_calib_get      = { .uri = "/api/sensor/calibrate",  .method = HTTP_GET,  .handler = api_sensor_calib_get_handler };
+    httpd_uri_t uri_calib_post     = { .uri = "/api/sensor/calibrate",  .method = HTTP_POST, .handler = api_sensor_calib_post_handler };
 
     httpd_register_uri_handler(server_handle, &uri_root);
     httpd_register_uri_handler(server_handle, &uri_status);
@@ -267,6 +364,8 @@ esp_err_t web_server_start(void) {
     httpd_register_uri_handler(server_handle, &uri_cmd_post);
     httpd_register_uri_handler(server_handle, &uri_scenes_get);
     httpd_register_uri_handler(server_handle, &uri_scene_exec);
+    httpd_register_uri_handler(server_handle, &uri_calib_get);
+    httpd_register_uri_handler(server_handle, &uri_calib_post);
 
     ESP_LOGI(TAG, "Web Server started successfully!");
     return ESP_OK;

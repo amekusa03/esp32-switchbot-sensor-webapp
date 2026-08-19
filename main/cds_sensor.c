@@ -6,12 +6,48 @@
 #include <esp_adc/adc_cali.h>
 #include <esp_adc/adc_cali_scheme.h>
 #include "cds_sensor.h"
+#include "nvs_config.h"
 
 static const char *TAG = "cds_sensor";
 
 static adc_oneshot_unit_handle_t s_adc_handle = NULL;
 static adc_cali_handle_t s_adc_cali_handle = NULL;
 static bool s_cali_enabled = false;
+
+// 2点校正データ (デフォルト: RAW 1300 = 13 Lux, RAW 70 = 0.1 Lux)
+static int   s_calib_raw1 = 1300;
+static float s_calib_lux1 = 13.0f;
+static int   s_calib_raw2 = 70;
+static float s_calib_lux2 = 0.1f;
+
+// 校正パラメータ (computed from 2-point calibration)
+static float s_calib_A    = 13.0f;
+static float s_calib_Rref = 19540.0f;
+static float s_calib_n    = 1.481f;
+
+// 校正パラメータを2点から再計算
+static void cds_sensor_compute_calib(void) {
+    // 線形ADC近似でRAW → 抵抗値変換
+    float v1 = (float)s_calib_raw1 * (CDS_VCC_MV / 4095.0f);
+    if (v1 < 1.0f)        v1 = 1.0f;
+    if (v1 >= CDS_VCC_MV) v1 = CDS_VCC_MV - 1.0f;
+    float r1 = CDS_PULLDOWN_RESISTOR * ((CDS_VCC_MV / v1) - 1.0f);
+    if (r1 < 1.0f) r1 = 1.0f;
+
+    float v2 = (float)s_calib_raw2 * (CDS_VCC_MV / 4095.0f);
+    if (v2 < 1.0f)        v2 = 1.0f;
+    if (v2 >= CDS_VCC_MV) v2 = CDS_VCC_MV - 1.0f;
+    float r2 = CDS_PULLDOWN_RESISTOR * ((CDS_VCC_MV / v2) - 1.0f);
+    if (r2 < 1.0f) r2 = 1.0f;
+
+    if (r1 != r2 && s_calib_lux1 > 0.0f && s_calib_lux2 > 0.0f && s_calib_lux1 != s_calib_lux2) {
+        s_calib_n    = logf(s_calib_lux1 / s_calib_lux2) / logf(r2 / r1);
+        s_calib_Rref = r1;
+        s_calib_A    = s_calib_lux1;
+    }
+    ESP_LOGI(TAG, "Calib params updated: A=%.3f R_ref=%.1f n=%.4f",
+             s_calib_A, s_calib_Rref, s_calib_n);
+}
 
 esp_err_t cds_sensor_init(void)
 {
@@ -55,6 +91,10 @@ esp_err_t cds_sensor_init(void)
 #endif
 
     ESP_LOGI(TAG, "CdS Sensor initialized on GPIO1 (ADC1_CH1)");
+
+    // NVSから校正値をロード・適用
+    cds_sensor_load_calib_from_nvs();
+
     return ESP_OK;
 }
 
@@ -111,8 +151,8 @@ esp_err_t cds_sensor_read(cds_sensor_data_t *data)
         r_cds = 1.0f;
     }
 
-    // 校正値に基づく照度計算
-    float lux = 300.0f * powf(7250.0f / r_cds, 2.727f);
+    // 動的校正パラメータに基づく照度計算 (NVSから読み込み、未設定時はデフォルト値)
+    float lux = s_calib_A * powf(s_calib_Rref / r_cds, s_calib_n);
     // RAW 10以下は完全な暗闇 (0 lux) として処理
     if (raw <= 10) {
         lux = 0.0f;
@@ -133,4 +173,53 @@ esp_err_t cds_sensor_read(cds_sensor_data_t *data)
     data->matter_value = cds_sensor_lux_to_matter_value(lux);
 
     return ESP_OK;
+}
+
+esp_err_t cds_sensor_set_calib_point(int point, int raw, float lux) {
+    if (point != 1 && point != 2) return ESP_ERR_INVALID_ARG;
+    if (lux <= 0.0f || raw < 0)  return ESP_ERR_INVALID_ARG;
+
+    if (point == 1) {
+        s_calib_raw1 = raw;
+        s_calib_lux1 = lux;
+    } else {
+        s_calib_raw2 = raw;
+        s_calib_lux2 = lux;
+    }
+    ESP_LOGI(TAG, "Calib point %d set: RAW=%d lux=%.3f", point, raw, lux);
+    cds_sensor_compute_calib();
+    return ESP_OK;
+}
+
+esp_err_t cds_sensor_load_calib_from_nvs(void) {
+    cds_calib_t calib;
+    esp_err_t err = nvs_config_load_cds_calib(&calib);
+    // nvs_config_load_cds_calib はエラー時もデフォルト値を設定するので常に適用
+    s_calib_raw1 = calib.raw1;
+    s_calib_lux1 = calib.lux1;
+    s_calib_raw2 = calib.raw2;
+    s_calib_lux2 = calib.lux2;
+    cds_sensor_compute_calib();
+    return err;
+}
+
+esp_err_t cds_sensor_save_calib_to_nvs(void) {
+    cds_calib_t calib = {
+        .raw1 = s_calib_raw1,
+        .lux1 = s_calib_lux1,
+        .raw2 = s_calib_raw2,
+        .lux2 = s_calib_lux2,
+    };
+    return nvs_config_save_cds_calib(&calib);
+}
+
+void cds_sensor_get_calib_params(int *raw1, float *lux1, int *raw2, float *lux2,
+                                  float *out_A, float *out_Rref, float *out_n) {
+    if (raw1)    *raw1    = s_calib_raw1;
+    if (lux1)    *lux1    = s_calib_lux1;
+    if (raw2)    *raw2    = s_calib_raw2;
+    if (lux2)    *lux2    = s_calib_lux2;
+    if (out_A)    *out_A    = s_calib_A;
+    if (out_Rref) *out_Rref = s_calib_Rref;
+    if (out_n)    *out_n    = s_calib_n;
 }
