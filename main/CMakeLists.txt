@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "main.cpp"
         "cds_sensor.c"
+        "temp_sensor.c"
         "nvs_config.c"
         "wifi_manager.c"
         "switchbot_api.c"

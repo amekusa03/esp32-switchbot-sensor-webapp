@@ -25,7 +25,14 @@ typedef struct {
  * @brief CdSセンサ（ADC1_CH1 / GPIO1）の初期化
  * @return esp_err_t ESP_OK成功時
  */
+#include <esp_adc/adc_oneshot.h>
+
 esp_err_t cds_sensor_init(void);
+
+/**
+ * @brief 初期化済みのADC1ユニットハンドルを取得
+ */
+adc_oneshot_unit_handle_t cds_sensor_get_adc_handle(void);
 
 /**
  * @brief CdSセンサの現在値を計測して取得

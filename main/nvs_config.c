@@ -139,3 +139,46 @@ esp_err_t nvs_config_save_cds_calib(const cds_calib_t *calib) {
     }
     return err;
 }
+
+
+esp_err_t nvs_config_load_temp_offset(float *offset) {
+    if (!offset) return ESP_ERR_INVALID_ARG;
+    *offset = 0.0f;
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Temp offset: NVS not found, using default 0.0");
+        return ESP_OK;
+    }
+
+    size_t sz = sizeof(float);
+    float fv = 0.0f;
+    if (nvs_get_blob(handle, "temp_offset", &fv, &sz) == ESP_OK) {
+        *offset = fv;
+    }
+
+    nvs_close(handle);
+    ESP_LOGI(TAG, "Temp offset loaded: %.2f C", *offset);
+    return ESP_OK;
+}
+
+esp_err_t nvs_config_save_temp_offset(float offset) {
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Temp offset: failed to open NVS for writing: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs_set_blob(handle, "temp_offset", &offset, sizeof(float));
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Temp offset saved to NVS: %.2f C", offset);
+    }
+    return err;
+}

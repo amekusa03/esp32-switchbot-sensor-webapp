@@ -1,12 +1,16 @@
-# ESP32-C3 SwitchBot Smart Home & smartOptSensor Hub
+# ESP32-C3 SwitchBot Smart Home & smartOptSensor / Temp Hub
 
-ESP32-C3 上で動作する高機能 Web サーバー経由で SwitchBot Open API v1.1 を制御し、同時に CdS 照度センサーによる照度計測および Matter Over Wi-Fi Light Sensor サービスを並行稼働させる統合システムです。
+ESP32-C3 上で動作する高機能 Web サーバー経由で SwitchBot Open API v1.1 を制御し、同時に CdS 照度センサーによる照度計測、サーミスタ温度センサーによる温度計測、および Matter Over Wi-Fi Light Sensor サービスを並行稼働させる統合システムです。
 
 ---
+![SwitchBot Web UI](./web_page.png)
 
 ## 🌟 特長 (Features)
 
 - **ESP32-C3 マイコン対応**: ESP32-C3 ターゲットに最適化されたファームウェア構成。
+- **B3950 10k サーミスタ温度計測 & smartOptSensor 照度計測機能**:
+  - **温度計測**: `GPIO3` (ADC1_CH3) にて B3950 10k NTC サーミスタと 10kΩ プルダウン抵抗による分圧回路から B定数 (3950K) 演算によりリアルタイム温度計測（摂氏 ℃）。
+  - **Web UI 温度オフセット校正**: センサー校正パネルから ±℃ の温度補正値を設定し NVS に永続保存可能。
 - **smartOptSensor 照度計測機能**:
   - **ピン配置**: `GPIO1` (ADC1_CH1) にて CdS セルと 約9.1kΩ プルダウン抵抗(100kΩ + 10kΩ並列)による分圧回路を 1,000ms 周期で高精度サンプリング（10回分散平均）。
   - **Lux & Matter 換算**: ADC生値・キャリブレーション電圧から CdS 抵抗値、Lux（照度）、および Matter 規格の `MeasuredValue`（`10000 * log10(lux) + 1`）を自動算出してシリアルログおよび Web UI にリアルタイム表示。
@@ -27,6 +31,7 @@ ESP32-C3 上で動作する高機能 Web サーバー経由で SwitchBot Open AP
 | :--- | :--- | :--- |
 | **3.3V** | CdS セルの片足 | 電源供給 |
 | **GPIO1 (ADC1_CH1)** | CdSセルとプルダウン抵抗(約9.1kΩ)の接続点 | ADC照度計測入力 |
+| **GPIO3 (ADC1_CH3)** | B3950サーミスタとプルダウン抵抗(10kΩ)の接続点 | ADC温度計測入力 |
 | **GND** | プルダウン抵抗(約9.1kΩ)の片足 | グランド |
 | **GPIO9** | タクトスイッチ（GNDへ短絡） | 3秒長押しでファクトリーリセット |
 
@@ -85,20 +90,23 @@ Wi-Fi 接続後、以下のいずれかの URL でダッシュボードにアク
 | --- | --- | --- |
 | `/` | `GET` | WebダッシュボードUIの配信 |
 | `/api/status` | `GET` | IPアドレス、WiFi電波強度(RSSI)、メモリ、NTP同期状態 |
-| `/api/sensor` | `GET` | CdS照度センサー情報取得 (`raw_adc`, `voltage_mv`, `resistance_ohm`, `lux`, `matter_value`) |
+| `/api/sensor` | `GET` | 照度＆温度センサー情報取得 (`raw_adc`, `lux`, `temp_celsius`, `temp_offset` 等) |
 | `/api/config` | `POST` | Wi-FiおよびSwitchBot認証情報のNVS保存 |
 | `/api/devices` | `GET` | SwitchBot Cloudから全デバイス・IRリモコン一覧を取得 |
 | `/api/device/command` | `POST` | デバイスへの操作コマンド送信 (`{"deviceId":"...","command":"turnOn"}`) |
 | `/api/scenes` | `GET` | 登録済みシーン一覧の取得 |
 | `/api/scene/execute` | `POST` | シーンの実行 (`{"sceneId":"..."}`) |
 | `/api/sensor/calibrate` | `GET` | 現在の CdS 校正パラメータ取得 (`raw1`, `lux1`, `raw2`, `lux2`, `A`, `R_ref`, `n`) |
-| `/api/sensor/calibrate` | `POST` | 校正点の記録 (`{"action":"set_point","point":1,"lux":13.0}`) または NVS保存 (`{"action":"save"}`) |
+| `/api/sensor/calibrate` | `POST` | 校正点の記録、温度オフセット保存 (`{"action":"set_temp_offset","offset":-1.5}`)、または NVS保存 |
 
 ---
 
 ## 🔧 CdS センサー校正 (Sensor Calibration)
 
-照度計測の精度を高めるため、Web UI から 2 点実測校正を行えます。校正値は **NVS（不揮発性ストレージ）に保存** され、電源オフ・再起動後も自動で引き継がれます。
+照度計測の精度向上（2点校正）および温度センサーのオフセット調整（1点補正）を Web UI から行えます。校正・設定値は **NVS（不揮発性ストレージ）に保存** され、電源オフ・再起動後も自動で引き継がれます。
+
+### 温度オフセット補正
+- Web UI上の「校正」パネルから、基準温度計などと比較したズレ（例: `-0.5` ℃）を入力し「温度オフセット保存」を行うことで即座に反映され、NVSに永続保存されます。
 
 ### 校正手順
 
@@ -128,5 +136,6 @@ lux = A × (R_ref / R_cds)^n
 | `cds_lux1` | blob (float) | Point 1 の実測照度 (Lux) |
 | `cds_raw2` | i32 | Point 2 の ADC 生値 |
 | `cds_lux2` | blob (float) | Point 2 の実測照度 (Lux) |
+| `temp_offset` | blob (float) | 温度のオフセット値 (℃) |
 
 > **フォールバック**: NVS 未書き込みの場合はデフォルト値 (RAW 1300 = 13 Lux / RAW 70 = 0.1 Lux) で動作します。

@@ -35,4 +35,14 @@ esp_err_t nvs_config_load_cds_calib(cds_calib_t *calib);
  */
 esp_err_t nvs_config_save_cds_calib(const cds_calib_t *calib);
 
+/**
+ * @brief 温度オフセット値をNVSからロード（未保存時は0.0f）
+ */
+esp_err_t nvs_config_load_temp_offset(float *offset);
+
+/**
+ * @brief 温度オフセット値をNVSに保存
+ */
+esp_err_t nvs_config_save_temp_offset(float offset);
+
 #endif // NVS_CONFIG_H

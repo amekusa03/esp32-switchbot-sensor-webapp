@@ -4,6 +4,7 @@
 #include "wifi_manager.h"
 #include "switchbot_api.h"
 #include "cds_sensor.h"
+#include "temp_sensor.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -14,6 +15,7 @@ static const char *TAG = "WEB_SERVER";
 static httpd_handle_t server_handle = NULL;
 
 extern bool get_latest_cds_sensor_data(cds_sensor_data_t *out_data);
+extern bool get_latest_temp_sensor_data(temp_sensor_data_t *out_data);
 
 static char *read_http_body(httpd_req_t *req) {
     int total_len = req->content_len;
@@ -61,6 +63,9 @@ static esp_err_t api_sensor_get_handler(httpd_req_t *req) {
     cds_sensor_data_t data = {0};
     bool valid = get_latest_cds_sensor_data(&data);
 
+    temp_sensor_data_t tdata = {0};
+    bool tvalid = get_latest_temp_sensor_data(&tdata);
+
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "valid", valid);
     cJSON_AddNumberToObject(root, "raw_adc", data.raw_adc);
@@ -68,6 +73,15 @@ static esp_err_t api_sensor_get_handler(httpd_req_t *req) {
     cJSON_AddNumberToObject(root, "resistance_ohm", data.resistance_ohm);
     cJSON_AddNumberToObject(root, "lux", data.lux);
     cJSON_AddNumberToObject(root, "matter_value", data.matter_value);
+
+    // B3950 Temp sensor fields
+    cJSON_AddBoolToObject(root, "temp_valid", tvalid);
+    cJSON_AddNumberToObject(root, "temp_celsius", tdata.temp_celsius);
+    cJSON_AddNumberToObject(root, "temp_raw_celsius", tdata.temp_raw_celsius);
+    cJSON_AddNumberToObject(root, "temp_offset", tdata.offset);
+    cJSON_AddNumberToObject(root, "temp_raw_adc", tdata.raw_adc);
+    cJSON_AddNumberToObject(root, "temp_voltage_mv", tdata.voltage_mv);
+    cJSON_AddNumberToObject(root, "temp_resistance_ohm", tdata.resistance_ohm);
 
     const char *resp = cJSON_PrintUnformatted(root);
     httpd_resp_set_type(req, "application/json");
@@ -279,15 +293,31 @@ static esp_err_t api_sensor_calib_post_handler(httpd_req_t *req) {
         } else {
             httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"set_point failed\"}");
         }
+    } else if (strcmp(action->valuestring, "set_temp_offset") == 0) {
+        cJSON *offset_j = cJSON_GetObjectItem(json, "offset");
+        if (!cJSON_IsNumber(offset_j)) {
+            cJSON_Delete(json);
+            httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Missing offset\"}");
+            return ESP_OK;
+        }
+        float offset = (float)offset_j->valuedouble;
+        cJSON_Delete(json);
+        temp_sensor_set_offset(offset);
+        esp_err_t err = temp_sensor_save_offset_to_nvs();
+        if (err == ESP_OK) {
+            httpd_resp_sendstr(req, "{\"status\":\"ok\",\"message\":\"Temp offset saved to NVS\"}");
+        } else {
+            httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Failed to save temp offset\"}");
+        }
     } else if (strcmp(action->valuestring, "save") == 0) {
         cJSON_Delete(json);
         esp_err_t err = cds_sensor_save_calib_to_nvs();
+        temp_sensor_save_offset_to_nvs();
         if (err == ESP_OK) {
             httpd_resp_sendstr(req, "{\"status\":\"ok\",\"message\":\"Calibration saved to NVS\"}");
         } else {
             httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"NVS save failed\"}");
         }
-    } else {
         cJSON_Delete(json);
         httpd_resp_sendstr(req, "{\"status\":\"error\",\"message\":\"Unknown action\"}");
     }

@@ -223,3 +223,7 @@ void cds_sensor_get_calib_params(int *raw1, float *lux1, int *raw2, float *lux2,
     if (out_Rref) *out_Rref = s_calib_Rref;
     if (out_n)    *out_n    = s_calib_n;
 }
+
+adc_oneshot_unit_handle_t cds_sensor_get_adc_handle(void) {
+    return s_adc_handle;
+}

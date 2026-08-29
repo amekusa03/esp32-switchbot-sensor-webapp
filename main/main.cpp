@@ -23,6 +23,7 @@ extern "C" {
 #include "wifi_manager.h"
 #include "web_server.h"
 #include "cds_sensor.h"
+#include "temp_sensor.h"
 }
 
 static const char *TAG = "MAIN_APP";
@@ -33,6 +34,7 @@ using namespace esp_matter::endpoint;
 using namespace chip::app::Clusters;
 
 static uint16_t s_endpoint_id = 1;
+static uint16_t s_temp_endpoint_id = 2;
 static volatile bool s_matter_ready = false;
 
 #define GPIO_FACTORY_RESET          GPIO_NUM_9
@@ -42,14 +44,25 @@ static volatile bool s_matter_ready = false;
 
 // 最新の CdS センサデータを保持（スレッドセーフアクセス用）
 static cds_sensor_data_t s_latest_sensor_data = {0};
+static temp_sensor_data_t s_latest_temp_data = {0};
 static portMUX_TYPE s_sensor_spinlock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_sensor_valid = false;
+static bool s_temp_valid = false;
 
 extern "C" bool get_latest_cds_sensor_data(cds_sensor_data_t *out_data) {
     if (!out_data) return false;
     taskENTER_CRITICAL(&s_sensor_spinlock);
     *out_data = s_latest_sensor_data;
     bool valid = s_sensor_valid;
+    taskEXIT_CRITICAL(&s_sensor_spinlock);
+    return valid;
+}
+
+extern "C" bool get_latest_temp_sensor_data(temp_sensor_data_t *out_data) {
+    if (!out_data) return false;
+    taskENTER_CRITICAL(&s_sensor_spinlock);
+    *out_data = s_latest_temp_data;
+    bool valid = s_temp_valid;
     taskEXIT_CRITICAL(&s_sensor_spinlock);
     return valid;
 }
@@ -63,6 +76,10 @@ static void cds_sensor_task(void *pvParameters)
     uint16_t last_reported_val = 0;
     bool has_reported = false;
     int64_t last_report_time_ms = 0;
+
+    int16_t last_reported_temp = 0;
+    bool temp_has_reported = false;
+    int64_t last_temp_report_time_ms = 0;
 
     while (true) {
         if (cds_sensor_read(&data) == ESP_OK) {
@@ -79,11 +96,25 @@ static void cds_sensor_task(void *pvParameters)
                      data.lux,
                      data.matter_value);
 
-            // Matter が開始されていれば IlluminanceMeasurement 属性を更新
+            temp_sensor_data_t temp_data;
+            bool temp_read_ok = (temp_sensor_read(&temp_data) == ESP_OK);
+            if (temp_read_ok) {
+                taskENTER_CRITICAL(&s_sensor_spinlock);
+                s_latest_temp_data = temp_data;
+                s_temp_valid = true;
+                taskEXIT_CRITICAL(&s_sensor_spinlock);
+
+                ESP_LOGI(TAG, "[Temp Sensor] RAW: %4d | Volt: %4d mV | Res: %7.1f Ohm | RawTemp: %4.1f C | Temp: %4.1f C (Offset: %+.1f C)",
+                         temp_data.raw_adc, temp_data.voltage_mv, temp_data.resistance_ohm,
+                         temp_data.temp_raw_celsius, temp_data.temp_celsius, temp_data.offset);
+            }
+
+            // Matter が開始されていれば属性を更新
             if (s_matter_ready) {
                 int64_t now_ms = esp_timer_get_time() / 1000;
+                
+                // 照度センサー更新
                 int diff = abs((int)data.matter_value - (int)last_reported_val);
-
                 bool should_report = !has_reported || 
                                      (diff >= MATTER_REPORT_DEADBAND) || 
                                      (now_ms - last_report_time_ms >= MATTER_REPORT_HEARTBEAT_MS);
@@ -99,6 +130,29 @@ static void cds_sensor_task(void *pvParameters)
                     has_reported = true;
 
                     ESP_LOGD(TAG, "Matter Illuminance updated: %u (diff: %d)", data.matter_value, diff);
+                }
+
+                // 温度センサー更新 (100倍値: 25.40℃ -> 2540)
+                if (temp_read_ok) {
+                    int16_t matter_temp = (int16_t)roundf(temp_data.temp_celsius * 100.0f);
+                    int temp_diff = abs((int)matter_temp - (int)last_reported_temp);
+                    // 0.5℃以上の変化またはハートビート周期で送信
+                    bool should_report_temp = !temp_has_reported ||
+                                              (temp_diff >= 50) ||
+                                              (now_ms - last_temp_report_time_ms >= MATTER_REPORT_HEARTBEAT_MS);
+
+                    if (should_report_temp) {
+                        esp_matter_attr_val_t temp_val = esp_matter_nullable_int16(matter_temp);
+                        esp_matter::attribute::update(s_temp_endpoint_id,
+                                                      TemperatureMeasurement::Id,
+                                                      TemperatureMeasurement::Attributes::MeasuredValue::Id,
+                                                      &temp_val);
+                        last_reported_temp = matter_temp;
+                        last_temp_report_time_ms = now_ms;
+                        temp_has_reported = true;
+
+                        ESP_LOGD(TAG, "Matter Temperature updated: %d (diff: %d)", matter_temp, temp_diff);
+                    }
                 }
             }
         } else {
@@ -263,6 +317,11 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "Failed to initialize CdS sensor");
     }
 
+    // B3950 温度センサ (ADC1_CH3 / GPIO3) の初期化
+    if (temp_sensor_init(cds_sensor_get_adc_handle()) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize Temp sensor on GPIO3");
+    }
+
     // CdS センサ周期計測タスクの作成
     xTaskCreate(cds_sensor_task, "cds_sensor_task", 4096, NULL, 5, NULL);
 
@@ -281,6 +340,20 @@ extern "C" void app_main(void)
             ESP_LOGI(TAG, "Matter Light Sensor Endpoint ID: %d", s_endpoint_id);
         } else {
             ESP_LOGE(TAG, "Failed to create Light Sensor endpoint");
+        }
+
+        // B3950 Temperature Sensor Endpoint creation
+        temperature_sensor::config_t temp_sensor_config;
+        temp_sensor_config.temperature_measurement.measured_value = 2500; // default 25.00 C
+        temp_sensor_config.temperature_measurement.min_measured_value = -4000; // -40.00 C
+        temp_sensor_config.temperature_measurement.max_measured_value = 12000; // 120.00 C
+
+        endpoint_t *temp_endpoint = temperature_sensor::create(node, &temp_sensor_config, ENDPOINT_FLAG_NONE, NULL);
+        if (temp_endpoint) {
+            s_temp_endpoint_id = endpoint::get_id(temp_endpoint);
+            ESP_LOGI(TAG, "Matter Temperature Sensor Endpoint ID: %d", s_temp_endpoint_id);
+        } else {
+            ESP_LOGE(TAG, "Failed to create Temperature Sensor endpoint");
         }
 
         esp_err_t err = esp_matter::start(app_event_cb);
