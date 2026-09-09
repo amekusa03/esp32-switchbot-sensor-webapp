@@ -1,65 +1,69 @@
+[日本語版のREADMEはこちら (Japanese README is available here)](./README.JP.md)
+
+---
+
 # ESP32-C3 SwitchBot Smart Home & smartOptSensor / Temp Hub
 
-ESP32-C3 上で動作する高機能 Web サーバー経由で SwitchBot Open API v1.1 を制御し、同時に CdS 照度センサーによる照度計測、サーミスタ温度センサーによる温度計測、および Matter Over Wi-Fi Light Sensor サービスを並行稼働させる統合システムです。
+An integrated smart home hub firmware running on the **ESP32-C3**. It combines a high-performance embedded Web server for controlling devices via **SwitchBot Open API v1.1**, real-time illuminance and temperature monitoring (CdS photoresistor + B3950 NTC thermistor), and a **Matter Over Wi-Fi Light Sensor** endpoint running concurrently.
 
 ---
 ![SwitchBot Web UI](./web_page.png)
 
-## 🌟 特長 (Features)
+## 🌟 Key Features
 
-- **ESP32-C3 マイコン対応**: ESP32-C3 ターゲットに最適化されたファームウェア構成。
-- **B3950 10k サーミスタ温度計測 & smartOptSensor 照度計測機能**:
-  - **温度計測**: `GPIO3` (ADC1_CH3) にて B3950 10k NTC サーミスタと 10kΩ プルダウン抵抗による分圧回路から B定数 (3950K) 演算によりリアルタイム温度計測（摂氏 ℃）。
-  - **Web UI 温度オフセット校正**: センサー校正パネルから ±℃ の温度補正値を設定し NVS に永続保存可能。
-- **smartOptSensor 照度計測機能**:
-  - **ピン配置**: `GPIO1` (ADC1_CH1) にて CdS セルと 約9.1kΩ プルダウン抵抗(100kΩ + 10kΩ並列)による分圧回路を 1,000ms 周期で高精度サンプリング（10回分散平均）。
-  - **Lux & Matter 換算**: ADC生値・キャリブレーション電圧から CdS 抵抗値、Lux（照度）、および Matter 規格の `MeasuredValue`（`10000 * log10(lux) + 1`）を自動算出してシリアルログおよび Web UI にリアルタイム表示。
-  - **Web UI 校正機能**: Web ダッシュボード上の「🔧 センサー校正」パネルから 2 点実測校正を実施。校正値（Point 1 / Point 2）は NVS に永続保存され、再起動後も自動で適用される。
-- **Matter Over Wi-Fi 対応**: Matter Light Sensor Endpoint (`0x0106`, Cluster `0x0400`) を提供し、Google Home などのスマートホームエコシステムから照度センサーとして認識・利用可能。
-- **ファクトリーリセット**: `GPIO9` ボタンを 3 秒以上長押しすることで Matter および NVS 設定のリセットを実行可能。
-- **SwitchBot Open API v1.1 HMAC-SHA256 認証実装**: `mbedtls` を使用して `token`, `secret`, ミリ秒精度 `t`, ランダム `nonce` による暗号署名を生成。
-- **NTP 時刻同期**: `esp_netif_sntp` で世界標準時を取得し、正確なタイムスタンプで API リクエストを送信。
-- **レスポンシブ Glassmorphism UI**: 照度センサーのリアルタイム表示バナーと SwitchBot 各種家電操作カードを一体化したデザイン。
-- **mDNS (Bonjour) 対応**: `http://esp32-switchbot.local/` でアクセス可能。IPアドレスを覚える必要なし。Matter の mDNS と共存する delegate hostname 方式を採用。
-- **SoftAP フォールバック & NVS 永続化**: Wi-Fi未設定時または接続失敗時は自動的に AP モード (`ESP32-SwitchBot-Setup`, `192.168.4.1`) で起動。
+- **ESP32-C3 Optimized**: Tailored firmware configuration designed for ESP32-C3 RISC-V SoC.
+- **B3950 10k Thermistor Temperature Monitoring**:
+  - **Measurement**: Real-time temperature measurement (°C) via `GPIO3` (ADC1_CH3) using a B3950 10k NTC thermistor with a 10kΩ pull-down resistor circuit and Steinhart-Hart / B-parameter (3950K) equation.
+  - **Web UI Calibration / Offset**: Configurable ±°C temperature offset directly from the calibration panel, persisted in NVS across reboots.
+- **smartOptSensor Illuminance (Lux) Measurement**:
+  - **Pin Mapping**: `GPIO1` (ADC1_CH1) samples voltage over a CdS photoresistor and pull-down resistor (~9.1kΩ, 100kΩ || 10kΩ parallel) with high-precision multisampling (10-sample distributed averaging every 1,000ms).
+  - **Lux & Matter Conversion**: Converts calibrated ADC voltage to CdS resistance, Lux, and Matter standard `MeasuredValue` (`10000 * log10(lux) + 1`) in real-time for both serial log and Web UI.
+  - **Web UI 2-Point Calibration**: Interactive 2-point live calibration directly on the Web dashboard. Parameters (`A`, `R_ref`, `n`) are stored persistently in NVS.
+- **Matter Over Wi-Fi Support**: Provides a native Matter Light Sensor Endpoint (`0x0106`, Cluster `0x0400`), allowing seamless integration into smart home ecosystems like Google Home and Apple HomeKit as an illuminance sensor.
+- **Factory Reset**: Long press the `GPIO9` button for >3 seconds to trigger Matter commissioning and NVS configuration resets.
+- **SwitchBot Open API v1.1 HMAC-SHA256 Authentication**: Built-in cryptographic signature generation using `mbedtls` with `token`, `secret`, millisecond timestamp `t`, and random `nonce`.
+- **NTP Time Synchronization**: Automated time synchronization with standard NTP servers via `esp_netif_sntp` for accurate cryptographic API request signing.
+- **Responsive Glassmorphism Web UI**: Unified web dashboard featuring live sensor monitoring banners, dynamic SwitchBot appliance control cards (Air Conditioner, TV, Bots, Plugs, Lights, Scenes), and modal configuration.
+- **mDNS (Bonjour) Support**: Accessible via `http://esp32-switchbot.local/` without needing to remember IP addresses. Uses delegate hostname scheme compatible with Matter mDNS.
+- **SoftAP Fallback & NVS Storage**: Automatically launches AP mode (`ESP32-SwitchBot-Setup`, `192.168.4.1`) when Wi-Fi credentials are not set or connection fails.
 
 ---
 
-## 🔌 ピン配置 (Pin Mapping)
+## 🔌 Pin Mapping
 
-| ESP32-C3 ピン | 接続先 | 役割 |
+| ESP32-C3 Pin | Connected To | Role |
 | :--- | :--- | :--- |
-| **3.3V** | CdS セルの片足 | 電源供給 |
-| **GPIO1 (ADC1_CH1)** | CdSセルとプルダウン抵抗(約9.1kΩ)の接続点 | ADC照度計測入力 |
-| **GPIO3 (ADC1_CH3)** | B3950サーミスタとプルダウン抵抗(10kΩ)の接続点 | ADC温度計測入力 |
-| **GND** | プルダウン抵抗(約9.1kΩ)の片足 | グランド |
-| **GPIO9** | タクトスイッチ（GNDへ短絡） | 3秒長押しでファクトリーリセット |
+| **3.3V** | Power rail of CdS photoresistor & Thermistor | Power Supply |
+| **GPIO1 (ADC1_CH1)** | Node between CdS cell and pull-down resistor (~9.1kΩ) | ADC Illuminance Measurement |
+| **GPIO3 (ADC1_CH3)** | Node between B3950 Thermistor and pull-down resistor (10kΩ) | ADC Temperature Measurement |
+| **GND** | Ground rail of pull-down resistors | Ground |
+| **GPIO9** | Tactile push button (pulled to GND when pressed) | Factory Reset (Hold for >3s) |
 
 ---
 
-## 🛠 ビルドおよび書き込み方法 (Build & Flash)
+## 🛠 Build & Flash
 
-### 1. 環境変数のロード
+### 1. Load ESP-IDF & ESP-Matter Environment
 
 ```bash
 source /home/kusa/esp/esp-idf/export.sh
 source /home/kusa/esp/esp-matter/export.sh
 ```
 
-### 2. ターゲットを esp32c3 に設定
+### 2. Set Target to ESP32-C3
 
 ```bash
-cd /home/kusa/ドキュメント/eSp32/SwitchBot+sensor
+cd /path/to/SwitchBot+sensor
 idf.py set-target esp32c3
 ```
 
-### 3. プロジェクトのビルド
+### 3. Build the Project
 
 ```bash
 idf.py build
 ```
 
-### 4. ESP32-C3 への書き込みとシリアルモニタ
+### 4. Flash to ESP32-C3 and Monitor Serial Output
 
 ```bash
 idf.py -p /dev/ttyACM0 flash monitor
@@ -67,75 +71,65 @@ idf.py -p /dev/ttyACM0 flash monitor
 
 ---
 
-## 🌐 ネットワークアクセス (Network Access)
+## 🌐 Network Access
 
-Wi-Fi 接続後、以下のいずれかの URL でダッシュボードにアクセスできます。
+Once connected to your local Wi-Fi, you can access the dashboard using any of the following URLs:
 
-| 方法 | URL | 備考 |
+| Method | URL | Description |
 | :--- | :--- | :--- |
-| **mDNS (推奨)** | `http://esp32-switchbot.local/` | iOS / macOS / Windows 10以降 / Linux (Avahi) で対応 |
-| **IPアドレス直接** | `http://<IPアドレス>/` | シリアルモニタで確認可能 |
-| **SoftAP モード** | `http://192.168.4.1/` | 初期設定時・Wi-Fi未接続時 |
+| **mDNS (Recommended)** | `http://esp32-switchbot.local/` | Supported on iOS, macOS, Windows 10+, and Linux (Avahi) |
+| **Direct IP Address** | `http://<ESP32_IP_ADDRESS>/` | Check serial monitor output for assigned IP |
+| **SoftAP Mode** | `http://192.168.4.1/` | Initial configuration or fallback mode |
 
-> **💡 Linux で mDNS を使う場合**: `avahi-daemon` と `libnss-mdns` のインストールが必要です。
+> **💡 Note for Linux users**: Install `avahi-daemon` and `libnss-mdns` to resolve `.local` domains:
 > ```bash
 > sudo apt install avahi-daemon libnss-mdns
 > ```
 
 ---
 
-## 📡 REST API 仕様 (Local Endpoints)
+## 📡 REST API Specifications (Local Endpoints)
 
-| エンドポイント | メソッド | 説明 |
+| Endpoint | Method | Description |
 | --- | --- | --- |
-| `/` | `GET` | WebダッシュボードUIの配信 |
-| `/api/status` | `GET` | IPアドレス、WiFi電波強度(RSSI)、メモリ、NTP同期状態 |
-| `/api/sensor` | `GET` | 照度＆温度センサー情報取得 (`raw_adc`, `lux`, `temp_celsius`, `temp_offset` 等) |
-| `/api/config` | `POST` | Wi-FiおよびSwitchBot認証情報のNVS保存 |
-| `/api/devices` | `GET` | SwitchBot Cloudから全デバイス・IRリモコン一覧を取得 |
-| `/api/device/command` | `POST` | デバイスへの操作コマンド送信 (`{"deviceId":"...","command":"turnOn"}`) |
-| `/api/scenes` | `GET` | 登録済みシーン一覧の取得 |
-| `/api/scene/execute` | `POST` | シーンの実行 (`{"sceneId":"..."}`) |
-| `/api/sensor/calibrate` | `GET` | 現在の CdS 校正パラメータ取得 (`raw1`, `lux1`, `raw2`, `lux2`, `A`, `R_ref`, `n`) |
-| `/api/sensor/calibrate` | `POST` | 校正点の記録、温度オフセット保存 (`{"action":"set_temp_offset","offset":-1.5}`)、または NVS保存 |
+| `/` | `GET` | Serves the single-page responsive Web Dashboard |
+| `/api/status` | `GET` | Retrieves system status (IP address, Wi-Fi RSSI, free heap, NTP sync state) |
+| `/api/sensor` | `GET` | Retrieves live sensor data (`raw_adc`, `lux`, `temp_celsius`, `temp_offset`, etc.) |
+| `/api/config` | `POST` | Saves Wi-Fi and SwitchBot API credentials into NVS |
+| `/api/devices` | `GET` | Fetches device list and IR remotes from SwitchBot Cloud API |
+| `/api/device/command` | `POST` | Sends control command to a SwitchBot device (`{"deviceId":"...","command":"turnOn"}`) |
+| `/api/scenes` | `GET` | Fetches registered SwitchBot automation scenes |
+| `/api/scene/execute` | `POST` | Executes a specific scene (`{"sceneId":"..."}`) |
+| `/api/sensor/calibrate` | `GET` | Retrieves current CdS calibration parameters (`raw1`, `lux1`, `raw2`, `lux2`, `A`, `R_ref`, `n`) |
+| `/api/sensor/calibrate` | `POST` | Records calibration points, saves temperature offset (`{"action":"set_temp_offset","offset":-1.5}`), or persists to NVS |
 
 ---
 
-## 🔧 CdS センサー校正 (Sensor Calibration)
+## ⚙️ Initial Setup Guide
 
-照度計測の精度向上（2点校正）および温度センサーのオフセット調整（1点補正）を Web UI から行えます。校正・設定値は **NVS（不揮発性ストレージ）に保存** され、電源オフ・再起動後も自動で引き継がれます。
+### 1. Wi-Fi & SwitchBot API Configuration
+1. Power on the ESP32-C3. If unconfigured, connect to the Wi-Fi AP named `ESP32-SwitchBot-Setup` and open `http://192.168.4.1/`.
+2. Click **⚙️ Settings** in the top right corner.
+3. Enter your **Wi-Fi SSID & Password**.
+4. Retrieve your **Open API Token** and **Secret Key** from the SwitchBot mobile app:
+   - Open SwitchBot App > Profile > Developer Options > Enable Developer Options.
+   - Copy the Token and Secret Key.
+5. Paste them into the dialog and click **Save & Connect**.
 
-### 温度オフセット補正
-- Web UI上の「校正」パネルから、基準温度計などと比較したズレ（例: `-0.5` ℃）を入力し「温度オフセット保存」を行うことで即座に反映され、NVSに永続保存されます。
+### 2. Matter Commissioning (Google Home / Apple Home)
+1. Ensure the ESP32-C3 is connected to your local network.
+2. In your Google Home or Apple Home app, tap **Add Device** > **Matter-enabled device**.
+3. Commission using the Matter QR Code or manual pairing code output on the ESP32 serial monitor during initial boot.
 
-### 校正手順
+### 3. Sensor Calibration (Web Dashboard)
+1. Click **🔧 Calibration ▼** on the ambient sensor banner.
+2. Under **Point 1 (Bright)**, measure the ambient light level with a lux meter or reference app, input the value, and click **Record Current**.
+3. Cover the sensor or darken the room, input the low lux value under **Point 2 (Dark)**, and click **Record Current**.
+4. For temperature, if there is a discrepancy with your reference thermometer, input the temperature offset (e.g. `-1.5` or `+0.8`) and click **Save Temp Offset**.
+5. Click **💾 Save to NVS** to store the calibration curves into non-volatile flash storage.
 
-1. ブラウザで `http://esp32-switchbot.local/` を開く
-2. センサーカード右下の **「校正 ▼」** ボタンをクリック
-3. **Point 1（明るい側）**: 照度計で実測した Lux 値を入力し「現在値で記録」を押す
-4. **Point 2（暗い側）**: 暗い環境に変えて同様に「現在値で記録」を押す
-5. **「💾 NVSに保存」** を押して確定する
+---
 
-### 校正モデル
+## 📜 License
 
-```
-lux = A × (R_ref / R_cds)^n
-```
-
-| パラメータ | 説明 |
-| :--- | :--- |
-| `A` | 基準照度（Point 1 の Lux 値） |
-| `R_ref` | Point 1 の CdS 抵抗値 (Ω) |
-| `n` | べき乗指数（2 点の比から自動算出） |
-
-### NVS キー (namespace: `sb_storage`)
-
-| キー | 型 | 説明 |
-| :--- | :--- | :--- |
-| `cds_raw1` | i32 | Point 1 の ADC 生値 |
-| `cds_lux1` | blob (float) | Point 1 の実測照度 (Lux) |
-| `cds_raw2` | i32 | Point 2 の ADC 生値 |
-| `cds_lux2` | blob (float) | Point 2 の実測照度 (Lux) |
-| `temp_offset` | blob (float) | 温度のオフセット値 (℃) |
-
-> **フォールバック**: NVS 未書き込みの場合はデフォルト値 (RAW 1300 = 13 Lux / RAW 70 = 0.1 Lux) で動作します。
+This project is open source and available under the [MIT License](LICENSE).
