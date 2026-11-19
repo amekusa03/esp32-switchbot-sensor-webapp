@@ -10,6 +10,7 @@
 #include <esp_netif.h>
 #include <esp_wifi.h>
 #include <esp_mac.h>
+#include <esp_now.h>
 #include <driver/gpio.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -24,6 +25,7 @@ extern "C" {
 #include "web_server.h"
 #include "cds_sensor.h"
 #include "temp_sensor.h"
+#include "esp_now_packet.h"
 }
 
 static const char *TAG = "MAIN_APP";
@@ -33,8 +35,13 @@ using namespace esp_matter::attribute;
 using namespace esp_matter::endpoint;
 using namespace chip::app::Clusters;
 
+// Matter エンドポイントID
+// Endpoint 1: ベランダ照度 (Light Sensor - ESP-NOW)
+// Endpoint 2: 室内温度 (Temperature Sensor - 親機直結 GPIO3)
+// Endpoint 3: ベランダ外気温 (Temperature Sensor - ESP-NOW)
 static uint16_t s_endpoint_id = 1;
 static uint16_t s_temp_endpoint_id = 2;
+static uint16_t s_outdoor_temp_endpoint_id = 3;
 static volatile bool s_matter_ready = false;
 
 #define GPIO_FACTORY_RESET          GPIO_NUM_9
@@ -42,9 +49,10 @@ static volatile bool s_matter_ready = false;
 #define MATTER_REPORT_DEADBAND      50     // Matter Value 変化閾値
 #define MATTER_REPORT_HEARTBEAT_MS  60000  // 最大更新間隔 (60秒)
 
-// 最新の CdS センサデータを保持（スレッドセーフアクセス用）
+// センサーデータ保持（スレッドセーフアクセス用）
 static cds_sensor_data_t s_latest_sensor_data = {0};
 static temp_sensor_data_t s_latest_temp_data = {0};
+static outdoor_sensor_data_t s_latest_outdoor_data = {0};
 static portMUX_TYPE s_sensor_spinlock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_sensor_valid = false;
 static bool s_temp_valid = false;
@@ -67,99 +75,144 @@ extern "C" bool get_latest_temp_sensor_data(temp_sensor_data_t *out_data) {
     return valid;
 }
 
-// 1000ms 周期で CdS センサを計測し、ログ出力・Web用変数更新・Matter属性更新を行うタスク
-static void cds_sensor_task(void *pvParameters)
+extern "C" bool get_latest_outdoor_sensor_data(outdoor_sensor_data_t *out_data) {
+    if (!out_data) return false;
+    taskENTER_CRITICAL(&s_sensor_spinlock);
+    *out_data = s_latest_outdoor_data;
+    bool valid = s_latest_outdoor_data.valid;
+    taskEXIT_CRITICAL(&s_sensor_spinlock);
+    return valid;
+}
+
+// 子機設定用情報のログ出力 (STA MACアドレス & チャンネル)
+static void print_esp_now_info(void)
 {
-    ESP_LOGI(TAG, "CdS Sensor sampling task started (1000ms cycle)");
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    uint8_t primary_ch = 0;
+    wifi_second_chan_t second_ch;
+    esp_wifi_get_channel(&primary_ch, &second_ch);
 
-    cds_sensor_data_t data;
-    uint16_t last_reported_val = 0;
-    bool has_reported = false;
-    int64_t last_report_time_ms = 0;
+    ESP_LOGI(TAG, "==================================================");
+    ESP_LOGI(TAG, " [ESP-NOW Config Info for Child Device]           ");
+    ESP_LOGI(TAG, "  Parent STA MAC Address : %02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    ESP_LOGI(TAG, "  Current Wi-Fi Channel   : %d", primary_ch);
+    ESP_LOGI(TAG, "==================================================");
+}
 
+// ESP-NOW パケット受信コールバック (ベランダ子機からのデータ受信)
+static void esp_now_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t *data, int len)
+{
+    if (len != sizeof(esp_now_sensor_packet_t)) {
+        ESP_LOGW(TAG, "ESP-NOW packet size mismatch: got %d, expected %d", len, (int)sizeof(esp_now_sensor_packet_t));
+        return;
+    }
+
+    const esp_now_sensor_packet_t *pkt = (const esp_now_sensor_packet_t *)data;
+
+    // Matter measured_value 換算: 10000 * log10(lux) + 1
+    uint16_t matter_lux = 1;
+    if (pkt->lux > 0.0001f) {
+        float val = 10000.0f * log10f(pkt->lux) + 1.0f;
+        if (val < 1.0f) val = 1.0f;
+        if (val > 65534.0f) val = 65534.0f;
+        matter_lux = (uint16_t)roundf(val);
+    }
+
+    taskENTER_CRITICAL(&s_sensor_spinlock);
+    s_latest_outdoor_data.lux = pkt->lux;
+    s_latest_outdoor_data.matter_value = matter_lux;
+    s_latest_outdoor_data.temp_celsius = pkt->temp_celsius;
+    s_latest_outdoor_data.battery_voltage = pkt->battery_voltage;
+    s_latest_outdoor_data.last_received_ms = esp_timer_get_time() / 1000;
+    if (recv_info && recv_info->src_addr) {
+        memcpy(s_latest_outdoor_data.sender_mac, recv_info->src_addr, 6);
+    }
+    s_latest_outdoor_data.valid = true;
+
+    // 既存 Web UI / API との互換性のため照度データを同期
+    s_latest_sensor_data.lux = pkt->lux;
+    s_latest_sensor_data.matter_value = matter_lux;
+    s_sensor_valid = true;
+    taskEXIT_CRITICAL(&s_sensor_spinlock);
+
+    ESP_LOGI(TAG, "[ESP-NOW Recv] Outdoor Lux: %6.1f (MatterVal: %u) | Temp: %4.1f C | Batt: %.2f V | From: %02X:%02X:%02X:%02X:%02X:%02X",
+             pkt->lux, matter_lux, pkt->temp_celsius, pkt->battery_voltage,
+             s_latest_outdoor_data.sender_mac[0], s_latest_outdoor_data.sender_mac[1],
+             s_latest_outdoor_data.sender_mac[2], s_latest_outdoor_data.sender_mac[3],
+             s_latest_outdoor_data.sender_mac[4], s_latest_outdoor_data.sender_mac[5]);
+
+    // Matter が開始されていれば属性を更新
+    if (s_matter_ready) {
+        // Endpoint 1: ベランダ照度 (Light Sensor)
+        esp_matter_attr_val_t lux_val = esp_matter_nullable_uint16(matter_lux);
+        esp_matter::attribute::update(s_endpoint_id,
+                                      IlluminanceMeasurement::Id,
+                                      IlluminanceMeasurement::Attributes::MeasuredValue::Id,
+                                      &lux_val);
+
+        // Endpoint 3: ベランダ外気温 (Temperature Sensor)
+        int16_t matter_outdoor_temp = (int16_t)roundf(pkt->temp_celsius * 100.0f);
+        esp_matter_attr_val_t temp_val = esp_matter_nullable_int16(matter_outdoor_temp);
+        esp_matter::attribute::update(s_outdoor_temp_endpoint_id,
+                                      TemperatureMeasurement::Id,
+                                      TemperatureMeasurement::Attributes::MeasuredValue::Id,
+                                      &temp_val);
+
+        ESP_LOGD(TAG, "Matter Outdoor updated: Lux=%u, Temp=%d", matter_lux, matter_outdoor_temp);
+    }
+}
+
+// 親機直結 B3950 サーミスタ (GPIO3) による室内温度計測タスク
+static void indoor_temp_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "Indoor Temp Sensor sampling task started (2000ms cycle)");
+
+    temp_sensor_data_t temp_data;
     int16_t last_reported_temp = 0;
     bool temp_has_reported = false;
     int64_t last_temp_report_time_ms = 0;
 
     while (true) {
-        if (cds_sensor_read(&data) == ESP_OK) {
-            // スレッドセーフに最新データを保持
+        if (temp_sensor_read(&temp_data) == ESP_OK) {
             taskENTER_CRITICAL(&s_sensor_spinlock);
-            s_latest_sensor_data = data;
-            s_sensor_valid = true;
+            s_latest_temp_data = temp_data;
+            s_temp_valid = true;
             taskEXIT_CRITICAL(&s_sensor_spinlock);
 
-            ESP_LOGI(TAG, "[CdS Sensor] RAW: %4d | Volt: %4d mV | Res: %7.1f Ohm | Lux: %7.1f | MatterVal: %u",
-                     data.raw_adc,
-                     data.voltage_mv,
-                     data.resistance_ohm,
-                     data.lux,
-                     data.matter_value);
+            ESP_LOGI(TAG, "[Indoor Temp] RAW: %4d | Volt: %4d mV | Res: %7.1f Ohm | RawTemp: %4.1f C | Temp: %4.1f C (Offset: %+.1f C)",
+                     temp_data.raw_adc, temp_data.voltage_mv, temp_data.resistance_ohm,
+                     temp_data.temp_raw_celsius, temp_data.temp_celsius, temp_data.offset);
 
-            temp_sensor_data_t temp_data;
-            bool temp_read_ok = (temp_sensor_read(&temp_data) == ESP_OK);
-            if (temp_read_ok) {
-                taskENTER_CRITICAL(&s_sensor_spinlock);
-                s_latest_temp_data = temp_data;
-                s_temp_valid = true;
-                taskEXIT_CRITICAL(&s_sensor_spinlock);
-
-                ESP_LOGI(TAG, "[Temp Sensor] RAW: %4d | Volt: %4d mV | Res: %7.1f Ohm | RawTemp: %4.1f C | Temp: %4.1f C (Offset: %+.1f C)",
-                         temp_data.raw_adc, temp_data.voltage_mv, temp_data.resistance_ohm,
-                         temp_data.temp_raw_celsius, temp_data.temp_celsius, temp_data.offset);
-            }
-
-            // Matter が開始されていれば属性を更新
+            // Matter Endpoint 2 (室内温度) の更新
             if (s_matter_ready) {
                 int64_t now_ms = esp_timer_get_time() / 1000;
-                
-                // 照度センサー更新
-                int diff = abs((int)data.matter_value - (int)last_reported_val);
-                bool should_report = !has_reported || 
-                                     (diff >= MATTER_REPORT_DEADBAND) || 
-                                     (now_ms - last_report_time_ms >= MATTER_REPORT_HEARTBEAT_MS);
+                int16_t matter_temp = (int16_t)roundf(temp_data.temp_celsius * 100.0f);
+                int temp_diff = abs((int)matter_temp - (int)last_reported_temp);
+                // 0.5℃以上の変化またはハートビート周期 (60秒) で送信
+                bool should_report = !temp_has_reported ||
+                                     (temp_diff >= 50) ||
+                                     (now_ms - last_temp_report_time_ms >= MATTER_REPORT_HEARTBEAT_MS);
 
                 if (should_report) {
-                    esp_matter_attr_val_t val = esp_matter_nullable_uint16(data.matter_value);
-                    esp_matter::attribute::update(s_endpoint_id,
-                                                  IlluminanceMeasurement::Id,
-                                                  IlluminanceMeasurement::Attributes::MeasuredValue::Id,
-                                                  &val);
-                    last_reported_val = data.matter_value;
-                    last_report_time_ms = now_ms;
-                    has_reported = true;
+                    esp_matter_attr_val_t temp_val = esp_matter_nullable_int16(matter_temp);
+                    esp_matter::attribute::update(s_temp_endpoint_id,
+                                                  TemperatureMeasurement::Id,
+                                                  TemperatureMeasurement::Attributes::MeasuredValue::Id,
+                                                  &temp_val);
+                    last_reported_temp = matter_temp;
+                    last_temp_report_time_ms = now_ms;
+                    temp_has_reported = true;
 
-                    ESP_LOGD(TAG, "Matter Illuminance updated: %u (diff: %d)", data.matter_value, diff);
-                }
-
-                // 温度センサー更新 (100倍値: 25.40℃ -> 2540)
-                if (temp_read_ok) {
-                    int16_t matter_temp = (int16_t)roundf(temp_data.temp_celsius * 100.0f);
-                    int temp_diff = abs((int)matter_temp - (int)last_reported_temp);
-                    // 0.5℃以上の変化またはハートビート周期で送信
-                    bool should_report_temp = !temp_has_reported ||
-                                              (temp_diff >= 50) ||
-                                              (now_ms - last_temp_report_time_ms >= MATTER_REPORT_HEARTBEAT_MS);
-
-                    if (should_report_temp) {
-                        esp_matter_attr_val_t temp_val = esp_matter_nullable_int16(matter_temp);
-                        esp_matter::attribute::update(s_temp_endpoint_id,
-                                                      TemperatureMeasurement::Id,
-                                                      TemperatureMeasurement::Attributes::MeasuredValue::Id,
-                                                      &temp_val);
-                        last_reported_temp = matter_temp;
-                        last_temp_report_time_ms = now_ms;
-                        temp_has_reported = true;
-
-                        ESP_LOGD(TAG, "Matter Temperature updated: %d (diff: %d)", matter_temp, temp_diff);
-                    }
+                    ESP_LOGD(TAG, "Matter Indoor Temp updated: %d (diff: %d)", matter_temp, temp_diff);
                 }
             }
         } else {
-            ESP_LOGE(TAG, "Failed to read CdS sensor");
+            ESP_LOGW(TAG, "Failed to read Indoor Temp sensor");
         }
 
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
 
@@ -202,6 +255,7 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
                 snprintf(ip, sizeof(ip), IPSTR, IP2STR(&info.ip));
                 ESP_LOGI(TAG, "Wi-Fi Connected for Matter. IP: %s", ip);
                 s_matter_ready = true;
+                print_esp_now_info();
             }
         }
         break;
@@ -295,7 +349,7 @@ static void store_wifi_credentials(const char *ssid, const char *pass)
 extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "==================================================");
-    ESP_LOGI(TAG, " ESP32-C3 SwitchBot Control Hub + smartOptSensor  ");
+    ESP_LOGI(TAG, " ESP32-C3 SwitchBot Hub & Dual Temp/Lux Sensor    ");
     ESP_LOGI(TAG, "==================================================");
 
     // Initialize NVS Storage
@@ -312,23 +366,24 @@ extern "C" void app_main(void)
         store_wifi_credentials(config.wifi_ssid, config.wifi_pass);
     }
 
-    // CdS センサ (ADC1_CH1 / GPIO1) の初期化
+    // ADC1 ユニットの初期化 (cds_sensor_init 経由)
     if (cds_sensor_init() != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize CdS sensor");
+        ESP_LOGE(TAG, "Failed to initialize ADC1 unit");
     }
 
-    // B3950 温度センサ (ADC1_CH3 / GPIO3) の初期化
+    // 親機直結 B3950 室内温度センサ (ADC1_CH3 / GPIO3) の初期化
     if (temp_sensor_init(cds_sensor_get_adc_handle()) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize Temp sensor on GPIO3");
+        ESP_LOGE(TAG, "Failed to initialize Indoor Temp sensor on GPIO3");
     }
 
-    // CdS センサ周期計測タスクの作成
-    xTaskCreate(cds_sensor_task, "cds_sensor_task", 4096, NULL, 5, NULL);
+    // 室内温度サンプリングタスクの作成 (2秒周期)
+    xTaskCreate(indoor_temp_task, "indoor_temp_task", 4096, NULL, 5, NULL);
 
-    // Matter ノードおよび Light Sensor エンドポイントの作成
+    // Matter ノードおよびマルチエンドポイントの作成
     node::config_t node_config;
     node_t *node = node::create(&node_config, app_attribute_update_cb, app_identification_cb);
     if (node) {
+        // Endpoint 1: ベランダ照度 (Light Sensor - ESP-NOW 受信値)
         light_sensor::config_t sensor_config;
         sensor_config.illuminance_measurement.measured_value = 1;
         sensor_config.illuminance_measurement.min_measured_value = 1;
@@ -337,23 +392,37 @@ extern "C" void app_main(void)
         endpoint_t *endpoint = light_sensor::create(node, &sensor_config, ENDPOINT_FLAG_NONE, NULL);
         if (endpoint) {
             s_endpoint_id = endpoint::get_id(endpoint);
-            ESP_LOGI(TAG, "Matter Light Sensor Endpoint ID: %d", s_endpoint_id);
+            ESP_LOGI(TAG, "Matter Outdoor Light Sensor Endpoint ID: %d", s_endpoint_id);
         } else {
-            ESP_LOGE(TAG, "Failed to create Light Sensor endpoint");
+            ESP_LOGE(TAG, "Failed to create Outdoor Light Sensor endpoint");
         }
 
-        // B3950 Temperature Sensor Endpoint creation
-        temperature_sensor::config_t temp_sensor_config;
-        temp_sensor_config.temperature_measurement.measured_value = 2500; // default 25.00 C
-        temp_sensor_config.temperature_measurement.min_measured_value = -4000; // -40.00 C
-        temp_sensor_config.temperature_measurement.max_measured_value = 12000; // 120.00 C
+        // Endpoint 2: 室内温度 (Temperature Sensor - 親機直結 GPIO3)
+        temperature_sensor::config_t indoor_temp_config;
+        indoor_temp_config.temperature_measurement.measured_value = 2500; // default 25.00 C
+        indoor_temp_config.temperature_measurement.min_measured_value = -4000; // -40.00 C
+        indoor_temp_config.temperature_measurement.max_measured_value = 12000; // 120.00 C
 
-        endpoint_t *temp_endpoint = temperature_sensor::create(node, &temp_sensor_config, ENDPOINT_FLAG_NONE, NULL);
-        if (temp_endpoint) {
-            s_temp_endpoint_id = endpoint::get_id(temp_endpoint);
-            ESP_LOGI(TAG, "Matter Temperature Sensor Endpoint ID: %d", s_temp_endpoint_id);
+        endpoint_t *indoor_endpoint = temperature_sensor::create(node, &indoor_temp_config, ENDPOINT_FLAG_NONE, NULL);
+        if (indoor_endpoint) {
+            s_temp_endpoint_id = endpoint::get_id(indoor_endpoint);
+            ESP_LOGI(TAG, "Matter Indoor Temperature Sensor Endpoint ID: %d", s_temp_endpoint_id);
         } else {
-            ESP_LOGE(TAG, "Failed to create Temperature Sensor endpoint");
+            ESP_LOGE(TAG, "Failed to create Indoor Temperature Sensor endpoint");
+        }
+
+        // Endpoint 3: ベランダ外気温 (Temperature Sensor - ESP-NOW 受信値)
+        temperature_sensor::config_t outdoor_temp_config;
+        outdoor_temp_config.temperature_measurement.measured_value = 2500; // default 25.00 C
+        outdoor_temp_config.temperature_measurement.min_measured_value = -4000; // -40.00 C
+        outdoor_temp_config.temperature_measurement.max_measured_value = 12000; // 120.00 C
+
+        endpoint_t *outdoor_endpoint = temperature_sensor::create(node, &outdoor_temp_config, ENDPOINT_FLAG_NONE, NULL);
+        if (outdoor_endpoint) {
+            s_outdoor_temp_endpoint_id = endpoint::get_id(outdoor_endpoint);
+            ESP_LOGI(TAG, "Matter Outdoor Temperature Sensor Endpoint ID: %d", s_outdoor_temp_endpoint_id);
+        } else {
+            ESP_LOGE(TAG, "Failed to create Outdoor Temperature Sensor endpoint");
         }
 
         esp_err_t err = esp_matter::start(app_event_cb);
@@ -370,6 +439,18 @@ extern "C" void app_main(void)
     // Initialize Wi-Fi Connection & Web Server
     wifi_manager_init(config.wifi_ssid, config.wifi_pass);
     web_server_start();
+
+    // ESP-NOW 受信機の初期化
+    esp_err_t now_err = esp_now_init();
+    if (now_err == ESP_OK) {
+        ESP_LOGI(TAG, "ESP-NOW Receiver initialized successfully");
+        esp_now_register_recv_cb(esp_now_recv_cb);
+    } else {
+        ESP_LOGE(TAG, "Failed to initialize ESP-NOW: %d", now_err);
+    }
+
+    // 子機設定用情報の初期表示
+    print_esp_now_info();
 
     // ファクトリーリセット用タスクの作成 (GPIO9)
     xTaskCreate(factory_reset_task, "factory_reset", 4096, nullptr, 1, nullptr);

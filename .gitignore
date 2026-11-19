@@ -1,9 +1,13 @@
 # ESP-IDF build directory
 build/
+outdoor_sensor/build/
 sdkconfig
 sdkconfig.old
 sdkconfig.ci
 managed_components/
+outdoor_sensor/managed_components/
+outdoor_sensor/sdkconfig
+outdoor_sensor/sdkconfig.old
 
 # Editor & IDE files
 .vscode/

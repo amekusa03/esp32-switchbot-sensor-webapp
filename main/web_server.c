@@ -5,6 +5,8 @@
 #include "switchbot_api.h"
 #include "cds_sensor.h"
 #include "temp_sensor.h"
+#include "esp_now_packet.h"
+#include "esp_timer.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -16,6 +18,7 @@ static httpd_handle_t server_handle = NULL;
 
 extern bool get_latest_cds_sensor_data(cds_sensor_data_t *out_data);
 extern bool get_latest_temp_sensor_data(temp_sensor_data_t *out_data);
+extern bool get_latest_outdoor_sensor_data(outdoor_sensor_data_t *out_data);
 
 static char *read_http_body(httpd_req_t *req) {
     int total_len = req->content_len;
@@ -66,15 +69,18 @@ static esp_err_t api_sensor_get_handler(httpd_req_t *req) {
     temp_sensor_data_t tdata = {0};
     bool tvalid = get_latest_temp_sensor_data(&tdata);
 
+    outdoor_sensor_data_t odata = {0};
+    bool ovalid = get_latest_outdoor_sensor_data(&odata);
+
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "valid", valid);
+    cJSON_AddBoolToObject(root, "valid", valid || ovalid);
     cJSON_AddNumberToObject(root, "raw_adc", data.raw_adc);
     cJSON_AddNumberToObject(root, "voltage_mv", data.voltage_mv);
     cJSON_AddNumberToObject(root, "resistance_ohm", data.resistance_ohm);
-    cJSON_AddNumberToObject(root, "lux", data.lux);
-    cJSON_AddNumberToObject(root, "matter_value", data.matter_value);
+    cJSON_AddNumberToObject(root, "lux", ovalid ? odata.lux : data.lux);
+    cJSON_AddNumberToObject(root, "matter_value", ovalid ? odata.matter_value : data.matter_value);
 
-    // B3950 Temp sensor fields
+    // 室内温度 (B3950 Temp sensor fields - 親機直結)
     cJSON_AddBoolToObject(root, "temp_valid", tvalid);
     cJSON_AddNumberToObject(root, "temp_celsius", tdata.temp_celsius);
     cJSON_AddNumberToObject(root, "temp_raw_celsius", tdata.temp_raw_celsius);
@@ -82,6 +88,30 @@ static esp_err_t api_sensor_get_handler(httpd_req_t *req) {
     cJSON_AddNumberToObject(root, "temp_raw_adc", tdata.raw_adc);
     cJSON_AddNumberToObject(root, "temp_voltage_mv", tdata.voltage_mv);
     cJSON_AddNumberToObject(root, "temp_resistance_ohm", tdata.resistance_ohm);
+
+    // ベランダ子機データ (ESP-NOW)
+    cJSON_AddBoolToObject(root, "outdoor_valid", ovalid);
+    if (ovalid) {
+        cJSON_AddNumberToObject(root, "outdoor_lux", odata.lux);
+        cJSON_AddNumberToObject(root, "outdoor_temp_celsius", odata.temp_celsius);
+        cJSON_AddNumberToObject(root, "outdoor_battery_voltage", odata.battery_voltage);
+
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        int64_t last_seen_sec = (now_ms >= odata.last_received_ms) ? ((now_ms - odata.last_received_ms) / 1000) : 0;
+        cJSON_AddNumberToObject(root, "outdoor_last_seen_sec", (double)last_seen_sec);
+
+        char mac_str[18] = {0};
+        snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 odata.sender_mac[0], odata.sender_mac[1], odata.sender_mac[2],
+                 odata.sender_mac[3], odata.sender_mac[4], odata.sender_mac[5]);
+        cJSON_AddStringToObject(root, "outdoor_mac", mac_str);
+    } else {
+        cJSON_AddNullToObject(root, "outdoor_lux");
+        cJSON_AddNullToObject(root, "outdoor_temp_celsius");
+        cJSON_AddNullToObject(root, "outdoor_battery_voltage");
+        cJSON_AddNumberToObject(root, "outdoor_last_seen_sec", -1);
+        cJSON_AddStringToObject(root, "outdoor_mac", "");
+    }
 
     const char *resp = cJSON_PrintUnformatted(root);
     httpd_resp_set_type(req, "application/json");
